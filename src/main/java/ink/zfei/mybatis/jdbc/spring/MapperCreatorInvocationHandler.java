@@ -1,7 +1,10 @@
 package ink.zfei.mybatis.jdbc.spring;
 
+import com.sun.org.apache.xpath.internal.operations.Bool;
+import ink.zfei.mybatis.jdbc.TransactionContext;
 import ink.zfei.mybatis.jdbc.annotations.Sql;
 
+import javax.sql.DataSource;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
@@ -10,19 +13,22 @@ import java.util.*;
 
 public class MapperCreatorInvocationHandler implements InvocationHandler {
 
+    private DataSource dataSource;
+
+
     public static final String DEFAULT_PLACEHOLDER_PREFIX = "#{";
     /**
      * Default placeholder suffix: {@value}.
      */
     public static final String DEFAULT_PLACEHOLDER_SUFFIX = "}";
 
-    public Object invoke(Object proxy, Method method, Object[] args) {
+    public MapperCreatorInvocationHandler(DataSource dataSource) {
+        this.dataSource = dataSource;
+    }
 
+    public Object invoke(Object proxy, Method method, Object[] args) throws SQLException {
 
         Object arg1 = args[0];
-        if (arg1 instanceof Long) {
-
-        }
 
         Sql annotation = method.getDeclaredAnnotation(Sql.class);
         if (annotation == null) {
@@ -33,7 +39,21 @@ public class MapperCreatorInvocationHandler implements InvocationHandler {
         ResultSet resultSet = null;
         Statement stmt = null;
         try {
-            conn = DriverManager.getConnection("jdbc:mysql://118.190.155.151:3306/demo", "root", "123456");
+//            conn = DriverManager.getConnection("jdbc:mysql://118.190.155.151:3306/demo", "root", "123456");
+            if (TransactionContext.inTransEnv()) {
+                if (TransactionContext.getConnection() == null) {
+                    //事务里的第一条sql，获取连接
+                    conn = dataSource.getConnection();
+                    TransactionContext.setConnection(conn);
+                    //开启事务
+                    conn.setAutoCommit(false);
+                } else {
+                    conn = TransactionContext.getConnection();
+                }
+            } else {
+                conn = dataSource.getConnection();
+            }
+
             String sql = annotation.value();
             //把#{} 解析出来出来，用args来替换
             String placeholder = parseSql(sql);
@@ -45,24 +65,44 @@ public class MapperCreatorInvocationHandler implements InvocationHandler {
             }
             sql = replaceSql(sql, newVal);
             stmt = conn.createStatement();
-            resultSet = stmt.executeQuery(sql);
-            Class returnType = method.getReturnType();
 
-            Field[] fields = returnType.getDeclaredFields();
-            Object result = returnType.newInstance();
-            while (resultSet.next()) {
-                for (Field field : fields) {
-                    Object val = resultSet.getObject(field.getName());
-                    field.setAccessible(true);
-                    field.set(result, val);
+            if (sql.contains("select")) {
+                resultSet = stmt.executeQuery(sql);
+                Class returnType = method.getReturnType();
+
+                Field[] fields = returnType.getDeclaredFields();
+                Object result = returnType.newInstance();
+                while (resultSet.next()) {
+                    for (Field field : fields) {
+                        Object val = resultSet.getObject(field.getName());
+                        field.setAccessible(true);
+                        field.set(result, val);
+                    }
+                }
+                return result;
+            } else if (sql.contains("insert") || sql.contains("update")) {
+                if (method.getReturnType() == Integer.class) {
+                    Boolean res = stmt.execute(sql);
+                    return res ? 1 : 0;
+                } else if (method.getReturnType() == Boolean.class) {
+                    return stmt.execute(sql);
+                } else {
+                    stmt.execute(sql);
+                    return null;
                 }
             }
-            return result;
+
+
         } catch (Exception e) {
             e.printStackTrace();
         } finally {
             try {
-                resultSet.close();
+                if (stmt != null) {
+                    stmt.close();
+                }
+                if (resultSet != null) {
+                    resultSet.close();
+                }
             } catch (SQLException e) {
                 e.printStackTrace();
             }
